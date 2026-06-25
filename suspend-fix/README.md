@@ -2,19 +2,36 @@ This workaround has been modified to load and unload the mt7921e wifi driver on 
 
 # What it does
 
-By default, this script:
+The script is **state-driven**: every transition is verified by polling
+the actual state of NetworkManager and the kernel — never by sleeping
+for an assumed amount of time. `sleep 0.5` appears only inside polling
+loops as the polling interval.
+
+By default, the script:
 
 1. Reloads `mt7921e` (`modprobe mt7921e`).
-2. Waits for a wireless interface to appear (≤ ~10s).
-3. **Turns the wifi radio OFF** via `nmcli radio wifi off`. The user
-   starts from a known "wifi disabled" state on every boot and resume
-   regardless of what the radio state was before.
+2. Waits for a wireless interface to appear (≤ ~10s, polled).
+3. Waits for NetworkManager to be reachable (≤ ~10s, polled).
+4. Performs a state-driven radio toggle on the wifi interface:
+   - `nmcli radio wifi off`, then **wait for NM to confirm `disabled`** (≤ 10s)
+   - **wait for the device state to reach `unavailable`** (≤ 5s)
+   - **wait for the kernel to report the interface is no longer up**
+     (this is the actual "firmware has torn down" signal) (≤ 5s)
+   - `nmcli radio wifi on`, then **wait for NM to confirm `enabled`** (≤ 10s)
+   - **wait for the device state to reach `disconnected`** (≤ 10s)
+   - **wait for the kernel to report the interface is up**
+     (this is the "firmware has loaded" signal) (≤ 5s)
+   - **wait for the first scan to return at least one network** (≤ 15s)
+5. The user picks a network by hand.
+
+If any of those waits times out, the script logs the timeout and
+continues to the next step — the rest of the sequence is still useful,
+and the journal will show exactly which step blocked.
 
 # Opt-in: automatic re-association
 
-If the radio toggle / rescan / connect dance works reliably on this
-hardware, you can have the script perform it automatically. Create the
-marker file:
+If you want the script to also try to connect to your most recently
+used saved network, create the marker file:
 
 ```
 sudo mkdir -p /etc/mt7921e-fix
@@ -23,12 +40,13 @@ sudo touch /etc/mt7921e-fix/auto-connect
 
 With the marker present, the script additionally:
 
-- Enables the wifi radio (the default would have just turned it off).
-- Unblocks the radio if it has been soft-blocked by a BIOS / hotkey.
-- Performs up to 3 radio-toggle / rescan / wait cycles, with 2 s between
-  off and on, and up to 8 s of waiting for a connection after each.
-- As a last resort, brings up the most recently used saved network
-  explicitly (covers `autoconnect=false` profiles and hidden SSIDs).
+- Unblocks the radio via `rfkill` if it has been soft-blocked.
+- Finds the most recently used saved wifi connection.
+- **Waits for that SSID to appear in the scan** (≤ 15s).
+- Brings up the connection with `nmcli connection up`.
+- **Waits for the device state to reach `connected`** (≤ 15s) to verify
+  the link actually came up (the `connection up` command only returns
+  success when the request is accepted, not when the link is up).
 
 To opt out:
 
@@ -36,14 +54,23 @@ To opt out:
 sudo rm /etc/mt7921e-fix/auto-connect
 ```
 
-The opt-in is best-effort. On hardware where the driver has a deeper
-firmware issue, manual intervention may still be required. With the
-marker absent, the script's only wifi-related action is to ensure the
-radio is off.
+# Why state-driven, not fixed-sleep
+
+The mt7921e driver reload races with the chip's firmware load,
+regulatory-domain re-setup, `wpa_supplicant`'s initial scan, and
+NetworkManager's internal state machine. Fixed-sleep approaches (e.g.
+`sleep 2` between off and on) often miss the actual transition — the
+first toggle can complete before the firmware is unloaded, the second
+toggle can complete before the first scan returns, and so on. That is
+why a single fixed-sleep toggle requires a manual retry.
+
+Polling for the actual state eliminates the race: each step is gated
+on the kernel/NM/wpa_supplicant having truly reached the desired state.
+The script returns from each helper as soon as the state is observed,
+so a fast machine completes in a few seconds, and a slow machine just
+waits longer (within the timeout) instead of giving up too early.
 
 # Install instructions
-
-run the following in terminal
 
 ```
 curl -L https://raw.githubusercontent.com/xfork24/ayaneo-air-pro-bazzite-fix/mt7921e_fix/suspend-fix/install.sh | sh
@@ -75,6 +102,7 @@ journalctl -b -u boot-fix.service -u resume-fix.service
 journalctl -t mt7921e-fix
 ```
 
-The script logs the stage of every step (driver reload, interface detection,
-NM readiness, wifi radio off, radio toggle, scan, explicit connection up)
-under the `mt7921e-fix` syslog tag.
+Every step logs a `step N/5: ...` line. If a step times out, the log
+will say so explicitly (e.g. `step 4f: TIMEOUT waiting for interface to
+be up (5s); continuing`). This tells you exactly which state transition
+the hardware is failing to complete.

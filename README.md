@@ -34,29 +34,51 @@ the driver at exactly the right moments:
 driver at boot is harmless on systems where the autoloader has already done
 its job.
 
-## Default behavior: driver reload + wifi off
+## Default behavior: state-driven wifi enable
 
 By default, the `resume-mods` script does the following on every boot and
-resume:
+resume. Every transition is verified by polling the actual state — never
+assumed to have completed after a fixed sleep:
 
 1. Reload `mt7921e`.
-2. Wait for a wireless interface to appear (≤ ~10s).
-3. **Turn the wifi radio OFF** via `nmcli radio wifi off`. The user
-   starts from a known "wifi disabled" state regardless of what the
-   radio state was before. NetworkManager's saved connections are
-   preserved — they are not deleted — but the radio is disabled until
-   the user re-enables it.
+2. Wait for a wireless interface to appear (≤ ~10s, polled).
+3. Wait for NetworkManager to be reachable (≤ ~10s, polled).
+4. **State-driven radio toggle** on the wifi interface:
+   - `nmcli radio wifi off`, then **wait for NM to report `disabled`** (≤ 10s)
+   - **wait for the device state to reach `unavailable`** (≤ 5s)
+   - **wait for the kernel to report the interface is no longer up** —
+     this is the actual "firmware has torn down" signal (≤ 5s)
+   - `nmcli radio wifi on`, then **wait for NM to report `enabled`** (≤ 10s)
+   - **wait for the device state to reach `disconnected`** (≤ 10s)
+   - **wait for the kernel to report the interface is up** — this is the
+     "firmware has loaded" signal (≤ 5s)
+   - **wait for the first scan to return at least one network** (≤ 15s)
+5. The user picks a network by hand.
 
-The user enables wifi and picks a network by hand. This is the **safe
-default** — the script enforces a deterministic post-boot / post-resume
-state.
+The user starts from a known "wifi enabled, fully initialized" state on
+every boot and resume, regardless of what the radio state was before.
+
+## Why state-driven, not fixed-sleep
+
+The mt7921e driver reload races with the chip's firmware load,
+regulatory-domain re-setup, `wpa_supplicant`'s initial scan, and
+NetworkManager's internal state machine. A fixed-sleep approach
+(`sleep 2` between off and on) can complete each toggle before the
+state actually transitions, so the next step is still racy — that is
+why a single fixed-sleep toggle requires a manual retry.
+
+Polling for the actual state eliminates the race: each step is gated
+on NM / the kernel / `wpa_supplicant` having truly reached the desired
+state. The script returns from each helper as soon as the state is
+observed, so a fast machine completes in a few seconds, and a slow
+machine just waits longer (within the timeout) instead of giving up
+too early. If the wifi stack hangs at any step, the journal will say
+exactly which step is blocked.
 
 ## Opt-in: automatic re-association
 
-The user-reported symptom after a suspend is that the radio is up but
-won't auto-connect to a saved network, and a manual "wifi off, wifi on"
-is needed to recover. To make the script handle this automatically, create
-the marker file:
+If you want the script to also try to connect to your most recently
+used saved network, create the marker file:
 
 ```
 sudo mkdir -p /etc/mt7921e-fix
@@ -65,12 +87,14 @@ sudo touch /etc/mt7921e-fix/auto-connect
 
 With the marker present, `resume-mods` additionally:
 
-- Enables the wifi radio (it may have been disabled).
-- Unblocks the radio if it has been soft-blocked by a BIOS / hotkey.
-- Performs up to 3 radio-toggle / rescan / wait cycles, with 2 s between
-  off and on, and up to 8 s of waiting for a connection after each.
-- As a last resort, brings up the most recently used saved network
-  explicitly (covers `autoconnect=false` profiles and hidden SSIDs).
+- Unblocks the radio via `rfkill` if it has been soft-blocked by a
+  BIOS / hotkey.
+- Finds the most recently used saved wifi connection.
+- **Waits for that SSID to appear in the scan** (≤ 15s, polled).
+- Brings up the connection with `nmcli connection up`.
+- **Waits for the device state to reach `connected`** (≤ 15s, polled)
+  to verify the link actually came up — `connection up` returning 0
+  only means the request was accepted, not that the link is up.
 
 To opt out:
 
@@ -78,8 +102,8 @@ To opt out:
 sudo rm /etc/mt7921e-fix/auto-connect
 ```
 
-This is best-effort. On hardware where the driver has a deeper firmware
-issue, manual intervention may still be required.
+This is best-effort. On hardware where the driver has a deeper
+firmware issue, manual intervention may still be required.
 
 ### Why these three triggers?
 
@@ -157,27 +181,31 @@ sudo rm -rf /etc/mt7921e-fix
 ## Verifying the install
 
 After installing and rebooting, confirm the driver loaded and the radio
-is off:
+came up cleanly:
 
 ```
 systemctl is-enabled suspend-fix.service resume-fix.service boot-fix.service
 lsmod | grep mt7921e
-nmcli radio wifi          # should print "disabled"
+nmcli radio wifi          # should print "enabled"
 journalctl -b -u boot-fix.service
 journalctl -b -t mt7921e-fix
 ```
+
+You should see a `step 1/5 ... step 4/5` sequence in the journal, with
+each step reporting the actual state observed (e.g. `step 4d: NM
+reports wifi radio = enabled`). If any step times out, the log will
+say so explicitly.
 
 Then test a suspend / resume cycle:
 
 ```
 systemctl suspend
 # wake the device
-nmcli radio wifi          # should still print "disabled"
+nmcli radio wifi          # should still print "enabled"
 journalctl -u suspend-fix.service -u resume-fix.service
 journalctl -t mt7921e-fix
 ```
 
-The default behavior reloads the driver and turns the radio off — you
-will need to enable wifi in the applet and pick a network. If you have
-created the opt-in marker, the journal will show the re-association
-attempts.
+The default behavior ends at `step 4/5` — you will still need to pick
+a network in the applet. If you have created the opt-in marker, the
+log will continue with `step 5/5` and the connection attempt.
