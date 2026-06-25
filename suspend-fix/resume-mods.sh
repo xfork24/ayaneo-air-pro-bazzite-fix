@@ -2,10 +2,12 @@
 # Reloads the mt7921e WiFi driver on resume from suspend and on cold boot.
 #
 # === Default behavior ===
-# Reload the driver and wait for the wireless interface to appear. The
-# wifi radio state, NetworkManager state, rfkill state, and saved
-# connections are NOT touched. The user is responsible for manually
-# enabling wifi and connecting to a network after a resume or boot.
+# Reload the driver, wait for the wireless interface to appear, and
+# then turn the wifi radio OFF. This makes the post-boot / post-resume
+# state deterministic: the radio is off regardless of what it was
+# before, and the user enables wifi manually when they need it.
+# NetworkManager's saved connections are not deleted, just the radio
+# is disabled.
 #
 # === Opt-in automatic re-association ===
 # Create the marker file
@@ -81,12 +83,36 @@ fi
 log "wireless interface: $WIFI_IFACE"
 
 # ---------------------------------------------------------------------------
-# 3. Default behavior: stop here. Do NOT touch the wifi radio state, do
-#    NOT enable wifi, do NOT unblock rfkill, do NOT try to connect. The
-#    user enables wifi manually when they need it.
+# 3. Default behavior: actively turn the wifi radio OFF, so the user
+#    starts from a known "wifi disabled" state on every boot and resume.
+#    This overrides whatever state the radio was in before (whether
+#    enabled by the user, by NM's default, or by the previous boot).
+#    The user enables wifi manually when they need it.
 # ---------------------------------------------------------------------------
 if [ ! -e /etc/mt7921e-fix/auto-connect ]; then
-    log "auto-connect not enabled; user must enable wifi manually"
+    log "auto-connect not enabled; enforcing wifi off (default)"
+    if ! command -v nmcli >/dev/null 2>&1; then
+        log "nmcli not found; cannot enforce wifi off"
+        exit 0
+    fi
+    # Brief wait (max ~5s) for NetworkManager to be reachable. On early
+    # boot NM may not be ready yet; in that case we skip the enforce and
+    # let the user (or NM's own startup logic) handle it.
+    i=0
+    while [ "$i" -lt 10 ]; do
+        if nmcli -t -f STATE general status >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+    if nmcli -t -f STATE general status >/dev/null 2>&1; then
+        nmcli radio wifi off 2>/dev/null || \
+            log "nmcli radio wifi off failed; will not retry"
+        log "wifi radio is now off (default)"
+    else
+        log "NetworkManager not ready; wifi off state not enforced this run"
+    fi
     exit 0
 fi
 

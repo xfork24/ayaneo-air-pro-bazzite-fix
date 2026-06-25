@@ -34,18 +34,22 @@ the driver at exactly the right moments:
 driver at boot is harmless on systems where the autoloader has already done
 its job.
 
-## Default behavior: driver reload only
+## Default behavior: driver reload + wifi off
 
-By default, the `resume-mods` script does the minimum:
+By default, the `resume-mods` script does the following on every boot and
+resume:
 
 1. Reload `mt7921e`.
 2. Wait for a wireless interface to appear (≤ ~10s).
-3. Stop.
+3. **Turn the wifi radio OFF** via `nmcli radio wifi off`. The user
+   starts from a known "wifi disabled" state regardless of what the
+   radio state was before. NetworkManager's saved connections are
+   preserved — they are not deleted — but the radio is disabled until
+   the user re-enables it.
 
-The wifi radio, NetworkManager, and saved connections are not touched.
-The user enables wifi and picks a network by hand, exactly as they would
-on a fresh install. This is the **safe default** — the script never
-overrides the user's prior wifi state.
+The user enables wifi and picks a network by hand. This is the **safe
+default** — the script enforces a deterministic post-boot / post-resume
+state.
 
 ## Opt-in: automatic re-association
 
@@ -152,11 +156,13 @@ sudo rm -rf /etc/mt7921e-fix
 
 ## Verifying the install
 
-After installing and rebooting, confirm the driver loaded:
+After installing and rebooting, confirm the driver loaded and the radio
+is off:
 
 ```
 systemctl is-enabled suspend-fix.service resume-fix.service boot-fix.service
 lsmod | grep mt7921e
+nmcli radio wifi          # should print "disabled"
 journalctl -b -u boot-fix.service
 journalctl -b -t mt7921e-fix
 ```
@@ -166,11 +172,12 @@ Then test a suspend / resume cycle:
 ```
 systemctl suspend
 # wake the device
+nmcli radio wifi          # should still print "disabled"
 journalctl -u suspend-fix.service -u resume-fix.service
 journalctl -t mt7921e-fix
 ```
 
-The default behavior reloads the driver but does not enable wifi — you
-should still need to enable wifi in the applet and pick a network. If you
-have created the opt-in marker, the journal will show the re-association
+The default behavior reloads the driver and turns the radio off — you
+will need to enable wifi in the applet and pick a network. If you have
+created the opt-in marker, the journal will show the re-association
 attempts.
