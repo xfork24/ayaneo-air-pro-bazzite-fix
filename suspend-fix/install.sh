@@ -25,13 +25,16 @@ sudo chmod +x /usr/local/bin/resume-mods
 # disable services if they already exist
 sudo systemctl disable --now resume-fix.service
 sudo systemctl disable --now suspend-fix.service
+sudo systemctl disable --now boot-fix.service
 
 sudo cp resume-fix.service /etc/systemd/system
 sudo cp suspend-fix.service /etc/systemd/system
+sudo cp boot-fix.service /etc/systemd/system
 
 sudo systemctl daemon-reload
 sudo systemctl enable resume-fix.service
 sudo systemctl enable suspend-fix.service
+sudo systemctl enable boot-fix.service
 
 echo "installation complete!"
 

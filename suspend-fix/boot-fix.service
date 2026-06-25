@@ -1,0 +1,12 @@
+[Unit]
+Description=mt7921e driver reload on boot
+After=systemd-modules-load.service network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/resume-mods
+User=root
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
