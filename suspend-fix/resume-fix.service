@@ -3,6 +3,7 @@ Description=On Sleep enable
 After=suspend.target
 
 [Service]
+Type=oneshot
 ExecStart=/usr/local/bin/resume-mods
 User=root
 

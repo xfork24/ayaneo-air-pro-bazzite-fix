@@ -3,6 +3,7 @@ Description=On Sleep disable
 Before=suspend.target
 
 [Service]
+Type=oneshot
 ExecStart=/usr/local/bin/suspend-mods
 User=root
 
