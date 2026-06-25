@@ -17,10 +17,17 @@ By default, the script:
    - **wait for the device state to reach `unavailable`** (≤ 5s)
    - **wait for the kernel to report the interface is no longer up**
      (this is the actual "firmware has torn down" signal) (≤ 5s)
+   - **`pkill wpa_supplicant`** and **wait for the process to actually
+     exit** (≤ 5s). This is the critical fix for the post-driver-reload
+     auth loop: the old `wpa_supplicant` instance has internal state
+     referencing a now-removed interface, and would otherwise
+     immediately abort any new authentication with `DEAUTH_LEAVING`
+     (visible in `dmesg`).
    - `nmcli radio wifi on`, then **wait for NM to confirm `enabled`** (≤ 10s)
+   - **wait for a fresh `wpa_supplicant` process to be running** (≤ 5s)
    - **wait for the device state to reach `disconnected`** (≤ 10s)
-   - **wait for the kernel to report the interface is up**
-     (this is the "firmware has loaded" signal) (≤ 5s)
+   - **wait for the kernel to report the interface is operational**
+     (`up`, `unknown`, or `dormant` are all accepted) (≤ 10s)
    - **wait for the first scan to return at least one network** (≤ 15s)
 5. The user picks a network by hand.
 
@@ -69,6 +76,23 @@ on the kernel/NM/wpa_supplicant having truly reached the desired state.
 The script returns from each helper as soon as the state is observed,
 so a fast machine completes in a few seconds, and a slow machine just
 waits longer (within the timeout) instead of giving up too early.
+
+# Why we explicitly kill `wpa_supplicant`
+
+`nmcli radio wifi off` does not actually stop the `wpa_supplicant`
+process — it just tells it to stop scanning. After the driver is
+reloaded and a new interface appears, the same `wpa_supplicant`
+process tries to manage it, but its internal state machine still
+references the old (now-removed) interface. The first authentication
+attempt therefore aborts immediately with `DEAUTH_LEAVING` (visible
+in `dmesg`), and the connection never comes up. The user has to
+manually toggle the radio several times to clear the state.
+
+The script works around this by `pkill`-ing `wpa_supplicant` after
+`nmcli radio wifi off` and before `nmcli radio wifi on`. NM detects
+the death and spawns a fresh `wpa_supplicant` instance with no stale
+state. The radio toggle then operates on a clean supplicant, and
+NM's autoconnect can complete in a single cycle.
 
 # Install instructions
 

@@ -171,6 +171,62 @@ wait_for_nm_reachable() {
     return 1
 }
 
+# Stop the wpa_supplicant process and wait for it to actually exit.
+# This is the key to clearing the corrupted auth state observed in
+# dmesg: the old wpa_supplicant instance, after a driver reload, will
+# immediately abort any new authentication with "DEAUTH_LEAVING"
+# because its internal state machine thinks it is still associated
+# with the now-defunct interface. Killing the process and letting NM
+# start a fresh one clears that state.
+# Args: <timeout-seconds>
+stop_wpa_supplicant() {
+    local timeout_s="$1"
+    local i max
+
+    # Send SIGTERM (graceful). If no process matches, pkill returns
+    # non-zero, which we treat as "already gone" and return success.
+    if ! pkill -TERM -x wpa_supplicant 2>/dev/null; then
+        # Either there was no wpa_supplicant, or it exited before we
+        # could check. Either way, it is not running now.
+        return 0
+    fi
+
+    # Wait up to timeout_s for the process to actually exit.
+    max=$((timeout_s * 2))
+    for i in $(seq 1 "$max"); do
+        if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    # Still alive after the timeout. Force-kill.
+    pkill -KILL -x wpa_supplicant 2>/dev/null || true
+    sleep 0.5
+    if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Wait for a wpa_supplicant process to be running. After we kill the
+# old one and tell NM to re-enable the radio, NM will spawn a fresh
+# wpa_supplicant. This helper confirms the new instance is up before
+# we proceed to wait for the device to reach a usable state.
+# Args: <timeout-seconds>
+wait_for_wpa_supplicant_running() {
+    local timeout_s="$1"
+    local i max
+    max=$((timeout_s * 2))
+    for i in $(seq 1 "$max"); do
+        if pgrep -x wpa_supplicant >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 # ===========================================================================
 # 1. Reload the driver. Skip cleanly on hardware that doesn't have mt7921e.
 # ===========================================================================
@@ -269,6 +325,23 @@ else
     log "step 4c: TIMEOUT waiting for interface to go down (5s); continuing"
 fi
 
+# 4c.5. Force-kill the stale wpa_supplicant process. This is the
+#       critical fix for the "DEAUTH_LEAVING" loop observed in dmesg:
+#       the old wpa_supplicant instance, after a driver reload, has
+#       internal state that references the now-removed interface. When
+#       the new interface comes up, the stale wpa_supplicant tries to
+#       authenticate but immediately aborts with reason
+#       DEAUTH_LEAVING (its state machine thinks it is already
+#       associated). Killing the process and letting NM spawn a fresh
+#       one clears that state. NM's autoconnect will then run cleanly
+#       against the new wpa_supplicant.
+log "step 4c.5: killing stale wpa_supplicant to clear corrupted auth state"
+if stop_wpa_supplicant 5; then
+    log "step 4c.5: wpa_supplicant has exited"
+else
+    log "step 4c.5: TIMEOUT waiting for wpa_supplicant to exit even after SIGKILL; continuing"
+fi
+
 # 4d. Turn radio on; verify NM confirms.
 if ! nmcli radio wifi on 2>/dev/null; then
     log "step 4d: nmcli radio wifi on returned non-zero; continuing"
@@ -277,6 +350,15 @@ if wait_for_wifi_radio "enabled" 10; then
     log "step 4d: NM reports wifi radio = enabled"
 else
     log "step 4d: TIMEOUT waiting for NM to report 'enabled' (10s); continuing"
+fi
+
+# 4d.5. Wait for NM to spawn a fresh wpa_supplicant. This confirms the
+#       old process is gone AND a new one is up before we proceed to
+#       wait for the device / scan to settle.
+if wait_for_wpa_supplicant_running 5; then
+    log "step 4d.5: fresh wpa_supplicant process is running"
+else
+    log "step 4d.5: TIMEOUT waiting for fresh wpa_supplicant (5s); continuing"
 fi
 
 # 4e. Wait for the device to be in a "ready but not connected" state.
@@ -289,13 +371,35 @@ else
     log "step 4e: TIMEOUT waiting for device to be 'disconnected' (10s); continuing"
 fi
 
-# 4f. Wait for the kernel to report the interface is up. This is the
-#     "firmware has actually loaded" signal — without it, the next scan
-#     would return nothing.
-if wait_for_iface_operational "$WIFI_IFACE" 5; then
-    log "step 4f: kernel reports interface $WIFI_IFACE = operstate up (firmware loaded)"
+# 4f. Wait for the kernel to report the interface is operational. The
+#     operstate can be "up", "unknown", or "dormant" depending on the
+#     driver's state machine; what matters is that it is not "down"
+#     or "notpresent". The mt7921e driver in particular can show
+#     "unknown" briefly while the firmware finishes initializing.
+#     Treat any of {up, unknown, dormant, testing} as good enough; the
+#     real verification is step 4g, which waits for the scan to
+#     actually return results.
+wait_for_iface_operational_lenient() {
+    local iface="$1" timeout_s="$2"
+    local i max oper
+    max=$((timeout_s * 2))
+    for i in $(seq 1 "$max"); do
+        if [ -e "/sys/class/net/$iface/operstate" ]; then
+            oper=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null) || oper=""
+            case "$oper" in
+                up|unknown|dormant|testing)
+                    return 0
+                    ;;
+            esac
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+if wait_for_iface_operational_lenient "$WIFI_IFACE" 10; then
+    log "step 4f: kernel reports interface $WIFI_IFACE is operational (firmware ready)"
 else
-    log "step 4f: TIMEOUT waiting for interface to be up (5s); continuing"
+    log "step 4f: TIMEOUT waiting for interface to be operational (10s); continuing"
 fi
 
 # 4g. Wait for the first scan to actually return at least one network.
