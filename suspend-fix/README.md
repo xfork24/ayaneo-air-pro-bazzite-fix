@@ -1,21 +1,42 @@
-This workaround has been modified to load and unload the mt7921e wifi driver on suspend-resume cycles, to reload it on cold boot, and to force NetworkManager to re-associate with a saved WiFi network afterwards. It is meant as a workaround for specific Ayaneo devices.
+This workaround has been modified to load and unload the mt7921e wifi driver on suspend-resume cycles, and to reload it on cold boot. It is meant as a workaround for specific Ayaneo devices.
 
 # What it does
 
-In addition to reloading the driver, the resume / boot path performs the same
-sequence a user would do by hand when the radio comes up but won't auto-connect:
+By default, this script:
 
-1. Loads `mt7921e`.
+1. Reloads `mt7921e` (`modprobe mt7921e`).
 2. Waits for a wireless interface to appear (≤ ~10s).
-3. Unblocks the radio if it has been soft-blocked by a BIOS / hotkey.
-4. Waits for NetworkManager to report a stable state (≤ ~15s).
-5. Toggles the radio off and back on to reset NM's internal state machine.
-6. Triggers a fresh scan so NM's known-networks list is current.
-7. As a safety net, brings up the most recently used saved connection
-   explicitly — covers profiles with `autoconnect=false` and hidden SSIDs.
+3. **Stops.** Does not touch the wifi radio, NetworkManager, or saved
+   connections. The user enables wifi and picks a network by hand.
 
-The script is best-effort: it exits 0 even when individual steps fail, so
-the calling systemd unit never goes into "failed" state.
+# Opt-in: automatic re-association
+
+Some users prefer the wifi to come back up automatically after a resume or
+boot. To opt in, create the marker file:
+
+```
+sudo mkdir -p /etc/mt7921e-fix
+sudo touch /etc/mt7921e-fix/auto-connect
+```
+
+With the marker present, the script additionally:
+
+- Enables the wifi radio (it may have been disabled by the user or by NM).
+- Unblocks the radio if it has been soft-blocked by a BIOS / hotkey.
+- Performs up to 3 radio-toggle / rescan / wait cycles, with 2 s between
+  off and on, and up to 8 s of waiting for a connection after each.
+- As a last resort, brings up the most recently used saved network
+  explicitly (covers `autoconnect=false` profiles and hidden SSIDs).
+
+To opt out:
+
+```
+sudo rm /etc/mt7921e-fix/auto-connect
+```
+
+The opt-in is best-effort. On hardware where the driver has a deeper
+firmware issue, manual intervention may still be required. The fix never
+overrides the user's prior state when the marker is absent.
 
 # Install instructions
 
@@ -38,11 +59,13 @@ sudo rm /usr/local/bin/resume-mods
 sudo rm /etc/systemd/system/resume-fix.service
 sudo rm /etc/systemd/system/suspend-fix.service
 sudo rm /etc/systemd/system/boot-fix.service
+
+sudo rm -rf /etc/mt7921e-fix
 ```
 
 # troubleshooting
 
-If WiFi does not auto-associate after a resume or boot, inspect the journal:
+If WiFi does not come up after a resume or boot, inspect the journal:
 
 ```
 journalctl -b -u boot-fix.service -u resume-fix.service
@@ -50,5 +73,5 @@ journalctl -t mt7921e-fix
 ```
 
 The script logs the stage of every step (driver reload, interface detection,
-rfkill state, NM readiness, radio toggle, scan, explicit connection up) under
-the `mt7921e-fix` syslog tag.
+NM readiness, radio toggle, scan, explicit connection up) under the
+`mt7921e-fix` syslog tag.

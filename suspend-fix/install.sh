@@ -40,7 +40,27 @@ echo "installation complete!"
 
 sudo rm -rf /tmp/ayaneo-air-pro-bazzite-fix
 
+# Prepare directory for the opt-in auto-connect marker. The directory is
+# created, but the marker file is NOT created — the default behavior is
+# to only reload the driver and leave the wifi radio state untouched.
+sudo mkdir -p /etc/mt7921e-fix
+
 # bazzite only
 
 sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/suspend-mods
 sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/resume-mods
+
+echo ""
+echo "================================================================="
+echo "  default: wifi is NOT auto-enabled or auto-connected."
+echo "  the driver is reloaded; you enable wifi and pick a network by hand."
+echo ""
+echo "  to opt into automatic re-association (radio toggle + rescan +"
+echo "  connect to the most recently used saved network), run:"
+echo ""
+echo "    sudo touch /etc/mt7921e-fix/auto-connect"
+echo ""
+echo "  to opt out, run:"
+echo ""
+echo "    sudo rm /etc/mt7921e-fix/auto-connect"
+echo "================================================================="
