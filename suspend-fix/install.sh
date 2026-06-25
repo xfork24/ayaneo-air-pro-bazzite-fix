@@ -8,13 +8,13 @@ fi
 echo "starting install of mt7921e fix"
 
 # remove if somehow already present
-sudo rm -rf /tmp/gpd-win-tricks
+sudo rm -rf /tmp/ayaneo-air-pro-bazzite-fix
 
 cd /tmp
 
-git clone -b mt7921e_fix --single-branch https://github.com/aarron-lee/gpd-win-tricks.git
+git clone -b mt7921e_fix --single-branch https://github.com/xfork24/ayaneo-air-pro-bazzite-fix.git
 
-cd gpd-win-tricks/suspend-fix
+cd ayaneo-air-pro-bazzite-fix/suspend-fix
 
 sudo cp ./suspend-mods.sh /usr/local/bin/suspend-mods
 sudo cp ./resume-mods.sh /usr/local/bin/resume-mods
@@ -38,7 +38,7 @@ sudo systemctl enable boot-fix.service
 
 echo "installation complete!"
 
-sudo rm -rf /tmp/gpd-win-tricks
+sudo rm -rf /tmp/ayaneo-air-pro-bazzite-fix
 
 # bazzite only
 

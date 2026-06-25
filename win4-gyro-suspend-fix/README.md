@@ -1,1 +1,1 @@
-moved to https://github.com/aarron-lee/gpd-win-tricks/tree/mt7921e_fix/suspend-fix
+moved to https://github.com/xfork24/ayaneo-air-pro-bazzite-fix/tree/mt7921e_fix/suspend-fix

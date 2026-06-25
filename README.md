@@ -1,4 +1,4 @@
-# gpd-win-tricks
+# ayaneo-air-pro-bazzite-fix
 
 Info on running linux on GPD Win devices. Note these are my own personal notes for documentation
 
