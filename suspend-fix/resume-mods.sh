@@ -375,9 +375,17 @@ if ! modinfo -F filename mt7921e >/dev/null 2>&1; then
     exit 0
 fi
 
-NEEDS_MODPROBE=1
-if [ -d /sys/module/mt7921e ] && [ -n "$(ls /sys/class/net/*/wireless 2>/dev/null)" ]; then
-    NEEDS_MODPROBE=0
+NEEDS_MODPROBE=0
+# If the module is not loaded yet, we need to modprobe. On cold boot
+# the kernel may still be mid-PCI-enumeration when boot-fix runs (we
+# saw `/sys/module/mt7921e` not yet present even though the device
+# was about to be probed), so checking ONLY the module directory —
+# not the wireless interface directory — is the right gate. The
+# original `&&` against the wireless dir caused us to modprobe when
+# the interface simply hadn't been created yet, which then triggered
+# kernel re-probe churn.
+if [ ! -d /sys/module/mt7921e ]; then
+    NEEDS_MODPROBE=1
 fi
 
 if [ "$NEEDS_MODPROBE" -eq 1 ]; then
@@ -523,12 +531,32 @@ fi
 #       wait for the device / scan to settle. The check dispatched by
 #       `wait_for_daemon_ready` differs by backend: iwd is checked via
 #       `iwctl adapter list` (a freshly restarted iwd registers the
-#       adapter within ~100ms); wpa_supplicant is checked via
-#       `pgrep -x` (NM spawns a fresh one when it sees the radio on).
-if wait_for_daemon_ready 10; then
+#       adapter within ~100ms — but in practice on this hardware it
+#       can take 5-15s, so the timeout is generous); wpa_supplicant
+#       is checked via `pgrep -x` (NM spawns a fresh one when it sees
+#       the radio on).
+if wait_for_daemon_ready 30; then
     log "step 4d.5: wifi daemon is ready (adapter visible to NM)"
 else
-    log "step 4d.5: TIMEOUT waiting for daemon ready (10s); continuing"
+    log "step 4d.5: TIMEOUT waiting for daemon ready (30s); continuing"
+fi
+
+# 4d.6. If iwd is the backend, force an explicit scan now. iwd's
+#       natural autoconnect timer can take 60+ seconds to fire its
+#       first scan after a service restart (autoconnect_quick /
+#       autoconnect_full cadence). `iwctl station <iface> scan`
+#       triggers an immediate scan that races with iwd's startup and
+#       gives step 4g something to verify quickly. Without this kick,
+#       iwd sits idle for ~60s after our reset, and the user sees a
+#       working wifi radio that doesn't connect for a minute. We only
+#       do this if 4d.5 saw the adapter (otherwise iwctl will error).
+if [ "$WIFI_DAEMON" = "iwd" ] && [ -n "$WIFI_IFACE" ]; then
+    log "step 4d.6: triggering fresh iwd scan on $WIFI_IFACE"
+    if iwctl station "$WIFI_IFACE" scan 2>/dev/null; then
+        log "step 4d.6: iwd scan requested"
+    else
+        log "step 4d.6: iwctl scan returned non-zero; continuing"
+    fi
 fi
 
 # 4e. Wait for the device to be in a "ready but not connected" state.
@@ -566,10 +594,10 @@ wait_for_iface_operational_lenient() {
     done
     return 1
 }
-if wait_for_iface_operational_lenient "$WIFI_IFACE" 10; then
+if wait_for_iface_operational_lenient "$WIFI_IFACE" 30; then
     log "step 4f: kernel reports interface $WIFI_IFACE is operational (firmware ready)"
 else
-    log "step 4f: TIMEOUT waiting for interface to be operational (10s); continuing"
+    log "step 4f: TIMEOUT waiting for interface to be operational (30s); continuing"
 fi
 
 # 4g. Wait for the first scan to actually return at least one network.
