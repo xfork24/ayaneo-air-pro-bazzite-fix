@@ -1,6 +1,7 @@
 [Unit]
 Description=mt7921e driver reload on boot
-After=systemd-modules-load.service network-pre.target
+After=systemd-modules-load.service NetworkManager.service
+Wants=NetworkManager.service
 
 [Service]
 Type=oneshot

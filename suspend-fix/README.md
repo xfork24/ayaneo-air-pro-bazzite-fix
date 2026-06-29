@@ -12,6 +12,13 @@ By default, the script:
 1. Reloads `mt7921e` (`modprobe mt7921e`).
 2. Waits for a wireless interface to appear (≤ ~10s, polled).
 3. Waits for NetworkManager to be reachable (≤ ~10s, polled).
+3.5. Waits for NetworkManager to actually claim the wifi device
+   (≤ ~15s, polled). This is the key cold-boot fix: NM can answer
+   `general status` long before it has finished initializing devices,
+   and a global `nmcli radio wifi off/on` issued before NM owns the
+   device silently no-ops. Without this wait the boot path silently
+   fails. On resume NM has owned the device all along, so the wait
+   returns immediately.
 4. Performs a state-driven radio toggle on the wifi interface:
    - `nmcli radio wifi off`, then **wait for NM to confirm `disabled`** (≤ 10s)
    - **wait for the device state to reach `unavailable`** (≤ 5s)
@@ -76,6 +83,17 @@ on the kernel/NM/wpa_supplicant having truly reached the desired state.
 The script returns from each helper as soon as the state is observed,
 so a fast machine completes in a few seconds, and a slow machine just
 waits longer (within the timeout) instead of giving up too early.
+
+# Boot-time ordering
+
+`boot-fix.service` is ordered `After=NetworkManager.service` (not
+`network-pre.target`, which is reached *before* NM has finished
+initializing its devices). Even with that ordering, NM can be
+"reachable" while still mid-init, so the script also waits
+explicitly for the wifi device to show up in `nmcli device status`
+as type `wifi` before issuing the radio toggle — this is step 3.5 in
+the log. On resume this returns immediately because NM already owns
+the device.
 
 # Why we explicitly kill `wpa_supplicant`
 

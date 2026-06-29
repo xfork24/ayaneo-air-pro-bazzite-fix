@@ -171,6 +171,31 @@ wait_for_nm_reachable() {
     return 1
 }
 
+# Wait for NetworkManager to actually claim the wifi device (i.e. the
+# interface shows up in `nmcli device status` as type "wifi"). NM can be
+# reachable and responsive long before it has finished initializing its
+# devices — at that point `nmcli radio wifi off/on` is accepted by NM,
+# but the global toggle is never propagated to a device state, and the
+# subsequent waits for "device unavailable / disconnected" all time out.
+# This is exactly what happens on cold boot when boot-fix races NM's
+# device-init; on resume NM has owned the device all along so this
+# returns immediately.
+# Args: <iface> <timeout-seconds>
+wait_for_nm_wifi_device() {
+    local iface="$1" timeout_s="$2"
+    local i max found
+    max=$((timeout_s * 2))
+    for i in $(seq 1 "$max"); do
+        found=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
+            | awk -F: -v d="$iface" '$1==d && $2=="wifi" {print "yes"; exit}')
+        if [ "$found" = "yes" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 # Stop the wpa_supplicant process and wait for it to actually exit.
 # This is the key to clearing the corrupted auth state observed in
 # dmesg: the old wpa_supplicant instance, after a driver reload, will
@@ -273,6 +298,19 @@ if ! wait_for_nm_reachable; then
     exit 0
 fi
 log "step 3/5: NetworkManager is reachable"
+
+# 3.5. Wait for NM to actually claim the wifi device. On cold boot, NM
+#      can answer `nmcli general status` long before it has finished
+#      initializing devices. The state-driven toggle below relies on NM
+#      being able to propagate the radio state to a device; without
+#      this wait the toggle silently no-ops and every subsequent wait
+#      (4b, 4d.5, 4e, 4f, 4g) times out. On resume NM already owns the
+#      device, so this returns immediately.
+if wait_for_nm_wifi_device "$WIFI_IFACE" 15; then
+    log "step 3.5/5: NetworkManager has claimed $WIFI_IFACE"
+else
+    log "step 3.5/5: TIMEOUT waiting for NM to claim $WIFI_IFACE (15s); continuing (toggle may not take effect)"
+fi
 
 # ===========================================================================
 # 4. State-driven radio toggle.
