@@ -678,20 +678,44 @@ fi
 log "step 5d: bringing up saved connection: $saved"
 case "$WIFI_DAEMON" in
     iwd)
-        # iwd can reject an explicit `iwctl station connect` while it
-        # is mid-autoconnect-cycle (e.g. right after our step 4c.5
-        # restart, iwd is sitting in `autoconnect_quick` /
-        # `autoconnect_full` cooldown and will reject anything that
-        # doesn't fit its internal state machine). When that happens
-        # we fall through to step 5e and wait — iwd's autoconnect
-        # cycle will eventually try saved BSSes and land on one that
-        # responds (empirically 60-120s on this hardware). Don't exit
-        # early; the wait in 5e handles the recovery path.
-        log "step 5d: iwd backend; using iwctl station connect to '$saved_ssid'"
-        if iwctl station "$WIFI_IFACE" connect "$saved_ssid" 2>/dev/null; then
-            log "step 5d: iwctl accepted connection to '$saved_ssid'"
-        else
-            log "step 5d: iwctl connect returned non-zero; will wait for iwd's autoconnect to settle"
+        # iwd rejects an explicit `iwctl station connect` while it is
+        # mid-autoconnect-cycle. After our step 4c.5 iwd restart, iwd
+        # is sitting in `autoconnect_quick` / `autoconnect_full`
+        # cooldown, and iwctl commands that don't fit its internal
+        # state machine get rejected with `Operation failed`. The
+        # rejection doesn't break anything — iwd continues its
+        # autoconnect cycle on its own — but it means our explicit
+        # connect never lands.
+        #
+        # The fix is to retry: iwd's full autoconnect cycle is ~60s,
+        # and during each cycle there is a brief `disconnected` window
+        # where iwd will accept an explicit connect. 12 attempts × 5s
+        # covers one full cycle. If any attempt lands, iwd connects
+        # immediately. If not, iwd's own autoconnect may have already
+        # connected (fast path detected inside the loop) or it will
+        # eventually (handled by step 5e's 120s wait).
+        log "step 5d: iwd backend; retrying iwctl station connect to '$saved_ssid'"
+        connected=0
+        for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if iwctl station "$WIFI_IFACE" connect "$saved_ssid" 2>/dev/null; then
+                log "step 5d: iwctl connect accepted on attempt $attempt"
+                connected=1
+                break
+            fi
+            # Fast path: iwd's own autoconnect may have succeeded
+            # between our attempts. If so, we're done.
+            state=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null \
+                | awk -F: -v d="$WIFI_IFACE" '$1==d {print $2; exit}')
+            if [ "$state" = "connected" ]; then
+                log "step 5d: device already connected (iwd autoconnect); attempt $attempt"
+                connected=1
+                break
+            fi
+            log "step 5d: iwctl connect attempt $attempt rejected; retrying in 5s"
+            sleep 5
+        done
+        if [ "$connected" -ne 1 ]; then
+            log "step 5d: iwctl connect did not land in 12 attempts; will wait for iwd's autoconnect"
         fi
         ;;
     *)
@@ -708,7 +732,7 @@ esac
 #     link is up.
 #
 #     For iwd this also covers the autoconnect-recovery case: when
-#     step 5d's explicit connect is rejected, iwd's autoconnect cycle
+#     step 5d's retries all get rejected, iwd's autoconnect cycle
 #     runs in the background and eventually lands on a working BSS.
 #     Empirically that takes 60-120s on this hardware, so the timeout
 #     here is generous. The previous 15s timeout was wrong: iwd's
