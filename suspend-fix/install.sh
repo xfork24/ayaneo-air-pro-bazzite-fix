@@ -18,9 +18,11 @@ cd ayaneo-air-pro-bazzite-fix/suspend-fix
 
 sudo cp ./suspend-mods.sh /usr/local/bin/suspend-mods
 sudo cp ./resume-mods.sh /usr/local/bin/resume-mods
+sudo cp ./boot-mods.sh /usr/local/bin/boot-mods
 
 sudo chmod +x /usr/local/bin/suspend-mods
 sudo chmod +x /usr/local/bin/resume-mods
+sudo chmod +x /usr/local/bin/boot-mods
 
 # disable services if they already exist
 sudo systemctl disable --now resume-fix.service
@@ -49,18 +51,21 @@ sudo mkdir -p /etc/mt7921e-fix
 
 sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/suspend-mods
 sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/resume-mods
+sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/boot-mods
 
 echo ""
 echo "================================================================="
-echo "  default: state-driven wifi enable on every boot and resume."
+echo "  on boot: a minimal script (boot-mods.sh) just activates the"
+echo "  mt7921e driver. ~1 second. no radio toggle, no daemon reset,"
+echo "  no auto-connect."
 echo ""
-echo "  the script reloads the driver, then drives the radio through a"
-echo "  full off -> on transition. each transition is verified by polling"
-echo "  the actual state of NetworkManager and the kernel — no fixed"
-echo "  sleeps, no races. the user still picks a network by hand."
+echo "  on resume from suspend: resume-mods.sh does a full state-driven"
+echo "  radio toggle (off → on) and resets the wifi daemon (iwd or"
+echo "  wpa_supplicant) to clear stale state. The user picks a network"
+echo "  by hand after resume."
 echo ""
 echo "  to opt into automatic connection to your most recently used"
-echo "  saved network (state-driven), run:"
+echo "  saved network on resume (state-driven), run:"
 echo ""
 echo "    sudo touch /etc/mt7921e-fix/auto-connect"
 echo ""
