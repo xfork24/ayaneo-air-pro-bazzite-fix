@@ -1,7 +1,7 @@
 [Unit]
 Description=mt7921e driver reload on boot
-After=systemd-modules-load.service NetworkManager.service
-Wants=NetworkManager.service
+After=systemd-modules-load.service NetworkManager.service iwd.service
+Wants=NetworkManager.service iwd.service
 
 [Service]
 Type=oneshot

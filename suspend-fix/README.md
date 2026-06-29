@@ -9,29 +9,41 @@ loops as the polling interval.
 
 By default, the script:
 
-1. Reloads `mt7921e` (`modprobe mt7921e`).
+1. Reloads `mt7921e` (`modprobe mt7921e`) — **only if not already
+   loaded**. On cold boot the kernel loads mt7921e during PCI
+   enumeration and a wireless interface is already present; re-running
+   `modprobe` causes kernel interface churn (kernel removes and
+   re-adds the interface, NetworkManager ends up with two devices
+   fighting over the same predictable name, drops one with
+   `unmanaged-link-not-init`, and the wifi never comes up). On resume,
+   `suspend-mods` unloaded the module, so `modprobe` is required.
+   The script detects the cold-boot case and skips the reload.
 2. Waits for a wireless interface to appear (≤ ~10s, polled).
 3. Waits for NetworkManager to be reachable (≤ ~10s, polled).
 3.5. Waits for NetworkManager to actually claim the wifi device
-   (≤ ~15s, polled). This is the key cold-boot fix: NM can answer
-   `general status` long before it has finished initializing devices,
-   and a global `nmcli radio wifi off/on` issued before NM owns the
-   device silently no-ops. Without this wait the boot path silently
-   fails. On resume NM has owned the device all along, so the wait
-   returns immediately.
+   (≤ ~15s, polled). NM can answer `general status` long before it
+   has finished initializing devices, so without this wait a global
+   `nmcli radio wifi off/on` issued from boot-fix races NM's
+   device-init and silently no-ops. On resume NM already owns the
+   device, so this returns immediately.
 4. Performs a state-driven radio toggle on the wifi interface:
    - `nmcli radio wifi off`, then **wait for NM to confirm `disabled`** (≤ 10s)
    - **wait for the device state to reach `unavailable`** (≤ 5s)
    - **wait for the kernel to report the interface is no longer up**
      (this is the actual "firmware has torn down" signal) (≤ 5s)
-   - **`pkill wpa_supplicant`** and **wait for the process to actually
-     exit** (≤ 5s). This is the critical fix for the post-driver-reload
-     auth loop: the old `wpa_supplicant` instance has internal state
-     referencing a now-removed interface, and would otherwise
-     immediately abort any new authentication with `DEAUTH_LEAVING`
-     (visible in `dmesg`).
+   - **Reset the wifi daemon's stale state**. On Bazzite the daemon
+     is iwd; on most other distros it is wpa_supplicant. The fix
+     differs by backend (see `# Why we reset the wifi daemon`
+     below):
+     - iwd: `systemctl restart iwd.service` + wait for it to be
+       running again (≤ 15s). iwd's adapter state is corrupted at
+       this point; a full service restart is the only reliable reset.
+     - wpa_supplicant: `pkill -TERM wpa_supplicant` + wait for the
+       process to actually exit (≤ 5s); NM spawns a fresh one.
    - `nmcli radio wifi on`, then **wait for NM to confirm `enabled`** (≤ 10s)
-   - **wait for a fresh `wpa_supplicant` process to be running** (≤ 5s)
+   - **Wait for the wifi daemon to be back with an adapter**
+     (≤ 10s). For iwd this is `iwctl adapter list` showing a `phy`
+     row; for wpa_supplicant this is `pgrep -x wpa_supplicant`.
    - **wait for the device state to reach `disconnected`** (≤ 10s)
    - **wait for the kernel to report the interface is operational**
      (`up`, `unknown`, or `dormant` are all accepted) (≤ 10s)
@@ -111,6 +123,42 @@ The script works around this by `pkill`-ing `wpa_supplicant` after
 the death and spawns a fresh `wpa_supplicant` instance with no stale
 state. The radio toggle then operates on a clean supplicant, and
 NM's autoconnect can complete in a single cycle.
+
+# Why we reset the wifi daemon (iwd-aware)
+
+The `DEAUTH_LEAVING` loop is not specific to wpa_supplicant: it is a
+property of any daemon that retains state across a driver reload or
+radio toggle. On Bazzite / Fedora Atomic, NetworkManager uses iwd
+(`/usr/lib/NetworkManager/conf.d/50-iwd.conf: wifi.backend=iwd`),
+so killing wpa_supplicant is a no-op — the script's `pkill` runs
+against a process that does not exist.
+
+The fix in step 4c.5 dispatches on the detected backend:
+
+- **iwd**: full service restart (`systemctl restart iwd.service`).
+  iwd's adapter state holds a handle to the now-defunct interface;
+  the only reliable reset is to drop the whole service and let
+  systemd bring it back up clean. On iwd restart the adapter
+  registration is lost; NM reattaches when it next sees an iwd
+  adapter, and iwd's first scan triggers autoconnect to a known
+  network.
+- **wpa_supplicant**: `pkill -TERM`, wait for exit, NM spawns fresh.
+
+The script auto-detects: it checks for an active `iwd.service`
+first, then falls back to checking for a running `wpa_supplicant`
+process. The detected backend is logged as `step 1/5: detected wifi
+daemon: iwd|wpa_supplicant|none`.
+
+# Boot-time ordering
+
+`boot-fix.service` is ordered `After=NetworkManager.service
+iwd.service` (not `network-pre.target`, which is reached *before*
+NM has finished initializing its devices). Even with that ordering,
+NM can be "reachable" while still mid-init, so the script also
+waits explicitly for the wifi device to show up in `nmcli device
+status` as type `wifi` before issuing the radio toggle — this is
+step 3.5 in the log. On resume this returns immediately because NM
+already owns the device.
 
 # Install instructions
 

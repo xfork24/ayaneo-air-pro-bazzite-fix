@@ -5,14 +5,37 @@
 # Every transition is verified by polling the actual state — never by
 # sleeping for an assumed amount of time. `sleep 0.5` only appears inside
 # polling loops as the polling interval. This eliminates the "race between
-# driver, firmware, wpa_supplicant, and NM" that requires multiple manual
-# radio toggles to overcome.
+# driver, firmware, the wifi daemon (iwd or wpa_supplicant), and NM" that
+# requires multiple manual radio toggles to overcome.
+#
+# === Cold-boot vs resume ===
+# On resume, suspend-mods has unloaded the module, so this script must
+# `modprobe mt7921e` to bring the driver back. On cold boot, the kernel
+# already loads mt7921e during PCI enumeration and a wireless interface
+# is already present — re-modprobing causes the kernel to remove and
+# re-add the interface, and NetworkManager ends up with two devices
+# fighting over the same predictable name, dropping one with
+# "unmanaged-link-not-init" (observed in boot logs). This script detects
+# the cold-boot case (module loaded + wireless interface present) and
+# skips modprobe there.
+#
+# === wifi daemon: iwd or wpa_supplicant ===
+# The "DEAUTH_LEAVING" loop (next auth aborts immediately after a radio
+# toggle or driver reload) is a stale-state issue in whichever daemon
+# owns the interface. On Bazzite / Fedora Atomic that is iwd
+# (`/usr/lib/NetworkManager/conf.d/50-iwd.conf: wifi.backend=iwd`); on
+# most other distros it is wpa_supplicant. The fix is daemon-specific:
+#
+#   wpa_supplicant: `pkill -TERM` (let NM respawn a fresh one)
+#   iwd:            `systemctl restart iwd.service` (full state reset)
+#
+# The script detects which backend is in use and dispatches.
 #
 # === Default behavior ===
-# Reload the driver, do a state-driven radio toggle (off → on, each
-# transition verified by polling NM and the kernel), wait for the first
-# scan to actually return results, and stop. The user picks a network
-# by hand.
+# Reload the driver if needed, do a state-driven radio toggle
+# (off → on, each transition verified by polling NM and the kernel),
+# reset the wifi daemon's stale state, wait for the first scan to
+# actually return results, and stop. The user picks a network by hand.
 #
 # === Opt-in automatic re-association ===
 # Create the marker file
@@ -253,15 +276,120 @@ wait_for_wpa_supplicant_running() {
 }
 
 # ===========================================================================
+# Backend dispatch: iwd vs wpa_supplicant.
+# ===========================================================================
+# Detect which wifi daemon is currently running. On Bazzite / Fedora
+# Atomic this is iwd (`/usr/lib/NetworkManager/conf.d/50-iwd.conf:
+# wifi.backend=iwd`); on most other distros it is wpa_supplicant. The
+# state-reset step below acts on whichever is running — each retains
+# stale internal state after a driver reload or radio toggle, and that
+# stale state is what causes the next auth to abort immediately with
+# DEAUTH_LEAVING (kernel log) on this hardware.
+WIFI_DAEMON=""
+if systemctl is-active --quiet iwd.service 2>/dev/null; then
+    WIFI_DAEMON="iwd"
+elif pgrep -x wpa_supplicant >/dev/null 2>&1; then
+    WIFI_DAEMON="wpa_supplicant"
+fi
+
+# Reset the wifi daemon's internal state so the next association attempt
+# runs against a clean state machine, not one that still references the
+# now-defunct interface. This is the daemon-specific equivalent of the
+# wpa_supplicant-only "pkill and let NM respawn" trick that originally
+# fixed the wpa_supplicant flavor of the DEAUTH_LEAVING loop.
+# Args: <timeout-seconds>
+reset_wifi_daemon() {
+    local timeout_s="$1"
+    case "$WIFI_DAEMON" in
+        iwd)
+            # A full service restart clears all of iwd's internal state:
+            # known-network cache, scan history, station state, and the
+            # adapter object. On startup iwd reads rfkill again and
+            # starts with the adapter Powered=false if NM currently has
+            # the radio disabled — `nmcli radio wifi on` later will turn
+            # it back on cleanly. NM reattaches to the new iwd instance
+            # and resumes autoconnect on the first scan.
+            log "step 4c.5: restarting iwd.service to clear stale adapter state"
+            systemctl restart iwd.service 2>/dev/null || true
+            local i max
+            max=$((timeout_s * 2))
+            for i in $(seq 1 "$max"); do
+                if systemctl is-active --quiet iwd.service 2>/dev/null; then
+                    return 0
+                fi
+                sleep 0.5
+            done
+            return 1
+            ;;
+        wpa_supplicant)
+            log "step 4c.5: killing stale wpa_supplicant to clear corrupted auth state"
+            stop_wpa_supplicant "$timeout_s"
+            ;;
+        *)
+            log "step 4c.5: no wifi daemon detected; skipping state reset"
+            return 0
+            ;;
+    esac
+}
+
+# Wait for the wifi daemon to be ready (post-reset) and have registered
+# an adapter with the kernel. After the radio comes back on, NM tells
+# the daemon to claim the device again; this helper confirms the daemon
+# is up and visible to NM before we proceed to wait for device / scan.
+# Args: <timeout-seconds>
+wait_for_daemon_ready() {
+    local timeout_s="$1"
+    case "$WIFI_DAEMON" in
+        iwd)
+            # iwd is up AND has at least one adapter registered. We poll
+            # `iwctl adapter list` rather than `pgrep iwd` because a
+            # freshly-restarted iwd can be running for ~100ms before it
+            # has finished enumerating adapters — and `systemctl
+            # is-active` would already be true at that point.
+            local i max
+            max=$((timeout_s * 2))
+            for i in $(seq 1 "$max"); do
+                if iwctl adapter list 2>/dev/null | grep -q '^[[:space:]]*phy'; then
+                    return 0
+                fi
+                sleep 0.5
+            done
+            return 1
+            ;;
+        wpa_supplicant)
+            wait_for_wpa_supplicant_running "$timeout_s"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# ===========================================================================
 # 1. Reload the driver. Skip cleanly on hardware that doesn't have mt7921e.
+#    Also skip modprobe on cold boot if the kernel has already loaded it
+#    and a wireless interface is present — re-modprobing causes kernel
+#    interface churn that NM ends up rejecting ("unmanaged-link-not-init").
 # ===========================================================================
 if ! modinfo -F filename mt7921e >/dev/null 2>&1; then
     exit 0
 fi
-log "step 1/5: reloading mt7921e driver"
-if ! modprobe mt7921e; then
-    log "step 1/5: modprobe failed; continuing so the interface may still come up"
+
+NEEDS_MODPROBE=1
+if [ -d /sys/module/mt7921e ] && [ -n "$(ls /sys/class/net/*/wireless 2>/dev/null)" ]; then
+    NEEDS_MODPROBE=0
 fi
+
+if [ "$NEEDS_MODPROBE" -eq 1 ]; then
+    log "step 1/5: loading mt7921e driver"
+    if ! modprobe mt7921e 2>/dev/null; then
+        log "step 1/5: modprobe failed; continuing so the interface may still come up"
+    fi
+else
+    log "step 1/5: mt7921e already loaded with wireless interface present; skipping modprobe to avoid re-probe churn"
+fi
+
+log "step 1/5: detected wifi daemon: ${WIFI_DAEMON:-none}"
 
 # ===========================================================================
 # 2. Wait for a wireless interface to appear under /sys. The interface
@@ -363,21 +491,20 @@ else
     log "step 4c: TIMEOUT waiting for interface to go down (5s); continuing"
 fi
 
-# 4c.5. Force-kill the stale wpa_supplicant process. This is the
-#       critical fix for the "DEAUTH_LEAVING" loop observed in dmesg:
-#       the old wpa_supplicant instance, after a driver reload, has
-#       internal state that references the now-removed interface. When
-#       the new interface comes up, the stale wpa_supplicant tries to
-#       authenticate but immediately aborts with reason
-#       DEAUTH_LEAVING (its state machine thinks it is already
-#       associated). Killing the process and letting NM spawn a fresh
-#       one clears that state. NM's autoconnect will then run cleanly
-#       against the new wpa_supplicant.
-log "step 4c.5: killing stale wpa_supplicant to clear corrupted auth state"
-if stop_wpa_supplicant 5; then
-    log "step 4c.5: wpa_supplicant has exited"
+# 4c.5. Reset the wifi daemon's stale state. After a driver reload or
+#       global radio toggle, the daemon (iwd or wpa_supplicant)
+#       retains internal state that still references the now-defunct
+#       interface. The next auth attempt aborts immediately with
+#       DEAUTH_LEAVING because the daemon's state machine thinks it is
+#       already associated. Killing (wpa_supplicant) or restarting
+#       (iwd) the daemon makes NM establish it fresh against the new
+#       interface. Dispatched by `reset_wifi_daemon` because the fix
+#       differs by backend — on Bazzite iwd is the backend; on most
+#       other distros wpa_supplicant is.
+if reset_wifi_daemon 15; then
+    log "step 4c.5: wifi daemon reset complete"
 else
-    log "step 4c.5: TIMEOUT waiting for wpa_supplicant to exit even after SIGKILL; continuing"
+    log "step 4c.5: TIMEOUT resetting wifi daemon (15s); continuing"
 fi
 
 # 4d. Turn radio on; verify NM confirms.
@@ -390,13 +517,18 @@ else
     log "step 4d: TIMEOUT waiting for NM to report 'enabled' (10s); continuing"
 fi
 
-# 4d.5. Wait for NM to spawn a fresh wpa_supplicant. This confirms the
-#       old process is gone AND a new one is up before we proceed to
-#       wait for the device / scan to settle.
-if wait_for_wpa_supplicant_running 5; then
-    log "step 4d.5: fresh wpa_supplicant process is running"
+# 4d.5. Wait for the wifi daemon to be back up with an adapter. This
+#       confirms that the daemon reset in 4c.5 has taken effect AND a
+#       new adapter registration is visible to NM before we proceed to
+#       wait for the device / scan to settle. The check dispatched by
+#       `wait_for_daemon_ready` differs by backend: iwd is checked via
+#       `iwctl adapter list` (a freshly restarted iwd registers the
+#       adapter within ~100ms); wpa_supplicant is checked via
+#       `pgrep -x` (NM spawns a fresh one when it sees the radio on).
+if wait_for_daemon_ready 10; then
+    log "step 4d.5: wifi daemon is ready (adapter visible to NM)"
 else
-    log "step 4d.5: TIMEOUT waiting for fresh wpa_supplicant (5s); continuing"
+    log "step 4d.5: TIMEOUT waiting for daemon ready (10s); continuing"
 fi
 
 # 4e. Wait for the device to be in a "ready but not connected" state.
