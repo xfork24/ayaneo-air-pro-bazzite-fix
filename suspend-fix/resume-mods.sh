@@ -678,12 +678,20 @@ fi
 log "step 5d: bringing up saved connection: $saved"
 case "$WIFI_DAEMON" in
     iwd)
+        # iwd can reject an explicit `iwctl station connect` while it
+        # is mid-autoconnect-cycle (e.g. right after our step 4c.5
+        # restart, iwd is sitting in `autoconnect_quick` /
+        # `autoconnect_full` cooldown and will reject anything that
+        # doesn't fit its internal state machine). When that happens
+        # we fall through to step 5e and wait — iwd's autoconnect
+        # cycle will eventually try saved BSSes and land on one that
+        # responds (empirically 60-120s on this hardware). Don't exit
+        # early; the wait in 5e handles the recovery path.
         log "step 5d: iwd backend; using iwctl station connect to '$saved_ssid'"
         if iwctl station "$WIFI_IFACE" connect "$saved_ssid" 2>/dev/null; then
             log "step 5d: iwctl accepted connection to '$saved_ssid'"
         else
-            log "step 5d: iwctl connect returned non-zero; user must connect manually"
-            exit 0
+            log "step 5d: iwctl connect returned non-zero; will wait for iwd's autoconnect to settle"
         fi
         ;;
     *)
@@ -695,12 +703,22 @@ case "$WIFI_DAEMON" in
 esac
 
 # 5e. Wait for the device to actually be in the "connected" state. This
-#     is the real verification — `connection up` returning 0 only means
-#     the request was accepted, not that the link is up.
-if wait_for_device_state "$WIFI_IFACE" "connected" 15; then
+#     is the real verification — `connection up` (or `iwctl connect`)
+#     returning 0 only means the request was accepted, not that the
+#     link is up.
+#
+#     For iwd this also covers the autoconnect-recovery case: when
+#     step 5d's explicit connect is rejected, iwd's autoconnect cycle
+#     runs in the background and eventually lands on a working BSS.
+#     Empirically that takes 60-120s on this hardware, so the timeout
+#     here is generous. The previous 15s timeout was wrong: iwd's
+#     autoconnect_full scan fires roughly once a minute, and the
+#     first BSS it tries (QQ2025_5G here) tends to fail with
+#     DEAUTH_LEAVING; iwd then has to retry with a different BSS.
+if wait_for_device_state "$WIFI_IFACE" "connected" 120; then
     log "step 5e: device $WIFI_IFACE is now connected; done"
 else
-    log "step 5e: TIMEOUT waiting for 'connected' state (15s); user must retry manually"
+    log "step 5e: TIMEOUT waiting for 'connected' state (120s); user must retry manually"
 fi
 
 exit 0
