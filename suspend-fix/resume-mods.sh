@@ -664,11 +664,35 @@ fi
 # 5d. Bring up the saved connection. This is a real action, not a wait:
 #     we issue the command and check the device state to see if it
 #     transitioned to connected.
+#
+#     For the iwd backend we use `iwctl station <iface> connect <SSID>`
+#     rather than `nmcli connection up`. NM's connection profile store
+#     and iwd's known-networks cache can disagree (NM may have a profile
+#     bound to a specific BSSID that is no longer responding), which
+#     makes `nmcli connection up` return non-zero even when the saved
+#     network is right there. `iwctl station connect` bypasses NM's
+#     profile lookup and asks iwd directly to find and associate — iwd
+#     picks the best responding BSS for the SSID and connects in one
+#     step. This sidesteps the "nmcli returns non-zero, user has to
+#     toggle and click" failure mode on Bazzite.
 log "step 5d: bringing up saved connection: $saved"
-if ! nmcli connection up "$saved" ifname "$WIFI_IFACE" 2>/dev/null; then
-    log "step 5d: nmcli connection up returned non-zero; user must connect manually"
-    exit 0
-fi
+case "$WIFI_DAEMON" in
+    iwd)
+        log "step 5d: iwd backend; using iwctl station connect to '$saved_ssid'"
+        if iwctl station "$WIFI_IFACE" connect "$saved_ssid" 2>/dev/null; then
+            log "step 5d: iwctl accepted connection to '$saved_ssid'"
+        else
+            log "step 5d: iwctl connect returned non-zero; user must connect manually"
+            exit 0
+        fi
+        ;;
+    *)
+        if ! nmcli connection up "$saved" ifname "$WIFI_IFACE" 2>/dev/null; then
+            log "step 5d: nmcli connection up returned non-zero; user must connect manually"
+            exit 0
+        fi
+        ;;
+esac
 
 # 5e. Wait for the device to actually be in the "connected" state. This
 #     is the real verification — `connection up` returning 0 only means
