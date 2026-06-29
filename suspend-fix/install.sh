@@ -18,11 +18,9 @@ cd ayaneo-air-pro-bazzite-fix/suspend-fix
 
 sudo cp ./suspend-mods.sh /usr/local/bin/suspend-mods
 sudo cp ./resume-mods.sh /usr/local/bin/resume-mods
-sudo cp ./boot-mods.sh /usr/local/bin/boot-mods
 
 sudo chmod +x /usr/local/bin/suspend-mods
 sudo chmod +x /usr/local/bin/resume-mods
-sudo chmod +x /usr/local/bin/boot-mods
 
 # disable services if they already exist
 sudo systemctl disable --now resume-fix.service
@@ -51,7 +49,6 @@ sudo mkdir -p /etc/mt7921e-fix
 
 sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/suspend-mods
 sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/resume-mods
-sudo chcon -u system_u -r object_r --type=bin_t /usr/local/bin/boot-mods
 
 echo ""
 echo "================================================================="

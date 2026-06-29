@@ -696,7 +696,7 @@ case "$WIFI_DAEMON" in
         # eventually (handled by step 5e's 120s wait).
         log "step 5d: iwd backend; retrying iwctl station connect to '$saved_ssid'"
         connected=0
-        for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        for attempt in 1 2 3; do
             if iwctl station "$WIFI_IFACE" connect "$saved_ssid" 2>/dev/null; then
                 log "step 5d: iwctl connect accepted on attempt $attempt"
                 connected=1
@@ -715,7 +715,7 @@ case "$WIFI_DAEMON" in
             sleep 5
         done
         if [ "$connected" -ne 1 ]; then
-            log "step 5d: iwctl connect did not land in 12 attempts; will wait for iwd's autoconnect"
+            log "step 5d: iwctl connect did not land in 3 attempts; will wait for iwd's autoconnect"
         fi
         ;;
     *)

@@ -2,30 +2,21 @@ This workaround has been modified to load and unload the mt7921e wifi driver on 
 
 # What it does
 
-There are two scripts that share a name space and get called from
-different systemd units. They have different scopes:
+The script is **state-driven**: every transition is verified by polling
+the actual state of NetworkManager and the kernel — never by sleeping
+for an assumed amount of time. `sleep 0.5` appears only inside polling
+loops as the polling interval.
 
-## `boot-mods.sh` — minimal driver activation (~1s)
+The same `resume-mods.sh` runs in two contexts:
 
-Runs once at boot from `boot-fix.service`. Does only what is needed
-to make the wifi driver available:
+- `boot-fix.service` runs it once at boot (after NetworkManager and
+  iwd are up) to drive the wifi driver through a clean
+  modprobe → radio-toggle → iwd-restart → scan → connect sequence.
+- `resume-fix.service` runs it after every suspend/resume cycle, where
+  the same sequence is needed because resume is when the kernel and
+  daemon state is most likely to need a reset.
 
-- `modprobe mt7921e` if the module is not yet loaded (some kernels
-  fail to fully bind mt7921e during PCI enumeration on first boot,
-  leaving the wireless interface uncreated).
-- Polls `/sys/class/net/*/wireless` for up to 5 seconds to confirm a
-  wireless interface appears.
-
-That's it. No radio toggle, no daemon restart, no NM state polling.
-The radio's on/off state after boot is whatever NM's state file says
-(typically enabled). iwd or wpa_supplicant then picks up from there;
-the user picks a network by hand.
-
-## `resume-mods.sh` — full state-driven radio toggle on resume
-
-Runs from `resume-fix.service` after every suspend/resume cycle. This
-is where the heavy lifting lives, because resume is when the kernel
-and daemon state is most likely to need a reset.
+By default, the script:
 
 The script is **state-driven**: every transition is verified by
 polling the actual state of NetworkManager and the kernel — never by
@@ -123,12 +114,13 @@ waits longer (within the timeout) instead of giving up too early.
 
 # Boot-time ordering
 
-`boot-fix.service` is ordered `After=systemd-modules-load.service`
-only — it doesn't depend on NetworkManager or iwd. The boot script is
-intentionally minimal (driver activation only, ~1s), so it can run
-early without racing NM's device-init. All the NM/iwd-aware state
-polling lives in `resume-mods.sh`, which runs after suspend where NM
-already owns the device.
+`boot-fix.service` is ordered `After=NetworkManager.service
+iwd.service` (not `network-pre.target`, which is reached *before* NM
+has finished initializing its devices). Even with that ordering, NM
+can be "reachable" while still mid-init, so the script also waits
+explicitly for the wifi device to show up in `nmcli device status`
+as type `wifi` before issuing the radio toggle — this is step 3.5 in
+the log.
 
 # Why we explicitly kill `wpa_supplicant`
 
@@ -187,7 +179,6 @@ sudo systemctl disable --now boot-fix.service
 
 sudo rm /usr/local/bin/suspend-mods
 sudo rm /usr/local/bin/resume-mods
-sudo rm /usr/local/bin/boot-mods
 
 sudo rm /etc/systemd/system/resume-fix.service
 sudo rm /etc/systemd/system/suspend-fix.service
@@ -205,9 +196,7 @@ journalctl -b -u boot-fix.service -u resume-fix.service
 journalctl -t mt7921e-fix
 ```
 
-Boot-time logs use `boot-fix:` prefix and are short (just driver
-activation). Resume-time logs use `step N/5: ...` lines from
-`resume-mods.sh` — if a step times out, the log will say so explicitly
-(e.g. `step 4f: TIMEOUT waiting for interface to be up (5s); continuing`).
-This tells you exactly which state transition the hardware is failing
-to complete.
+Every step logs a `step N/5: ...` line. If a step times out, the log
+will say so explicitly (e.g. `step 4f: TIMEOUT waiting for interface to
+be up (5s); continuing`). This tells you exactly which state transition
+the hardware is failing to complete.

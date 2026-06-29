@@ -1,10 +1,11 @@
 [Unit]
-Description=mt7921e driver activation on boot
-After=systemd-modules-load.service
+Description=mt7921e driver reload on boot
+After=systemd-modules-load.service NetworkManager.service iwd.service
+Wants=NetworkManager.service iwd.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/boot-mods
+ExecStart=/usr/local/bin/resume-mods
 User=root
 RemainAfterExit=yes
 
